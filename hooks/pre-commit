@@ -1,0 +1,150 @@
+#!/bin/sh
+
+# 颜色配置
+RED=$(tput setaf 1)
+GREEN=$(tput setaf 2)
+NORMAL=$(tput sgr0)
+
+# gofmt
+enableGoFmt=true
+gofmtThrowErr=true
+
+# goimports
+enableGoImports=true
+goImportsThrowErr=true
+
+# golangci-lint
+enableGolangciLint=true
+golangciLintThrowErr=true
+
+# gocognit
+enableGocognit=true
+gocognitThreshold=30
+gocognitThrowErr=true
+
+has_errors=0
+
+# 获取git暂存的所有go代码
+# --cached 暂存的
+# --name-only 只显示名字
+# --diff-filter=ACM 过滤暂存文件，A=Added C=Copied M=Modified, 即筛选出添加/复制/修改的文件
+allgofiles=$(git diff --cached --name-only --diff-filter=ACM | grep '.go$')
+
+gofiles=()
+godirs=()
+for allfile in ${allgofiles[@]}; do
+    # 过滤vendor 和 protobuf自动生产的文件
+    if [[ $allfile == "vendor"* || $allfile == *".pb.go" ]];then
+        continue
+    else
+        gofiles+=("$allfile")
+
+        # 文件夹去重
+        existdir=0
+        dir=`echo "$allfile" |xargs -n1 dirname|sort -u`
+        for somedir in ${godirs[@]}; do
+            if [[ $dir == $somedir ]]; then 
+                existdir=1
+                break
+            fi
+        done
+
+        if [[ $existdir -eq 0 ]]; then
+            godirs+=("$dir")
+        fi
+    fi
+done
+
+[ -z "$gofiles" ] && exit 0
+
+if [ $enableGoFmt == true ]; then
+	  echo >&2 "${NORMAL}gofmt CHECK"
+	  # gofmt 格式化代码
+	  unformatted=$(gofmt -l ${gofiles[@]})
+	  if [ -n "$unformatted" ]; then
+		    echo >&2 "${RED}gofmt FAIL:\n Run following command:"
+		    for f in ${unformatted[@]}; do
+			      echo >&2 "gofmt -w $PWD/$f"
+		    done
+		    echo "\n"
+		    if [ $gofmtThrowErr == true ]; then
+	          has_errors=1
+	      fi
+	  else
+		    echo >&2 "${GREEN}gofmt SUCCESS\n"
+	  fi
+fi
+
+if [ $enableGoImports == true ]; then
+	  echo >&2 "${NORMAL}goimports CHECK"
+	  # goimports 自动导包
+	  if goimports >/dev/null 2>&1; then  # 检测是否安装
+		    unimports=$(goimports -l ${gofiles[@]})
+		    if [ -n "$unimports" ]; then
+			      echo >&2 "goimports FAIL:\nRun following command:"
+			      for f in ${unimports[@]} ; do
+				        echo >&2 " goimports -w $PWD/$f"
+			      done
+			      echo "\n"
+			      if [ $goImportsThrowErr == true ]; then
+                has_errors=1
+            fi
+        else
+			      echo >&2 "${GREEN}goimports SUCCESS\n"
+		    fi
+	  else
+		    echo '${RED}goimports not install. Run: "go get -u golang.org/x/tools/cmd/goimports"' >&2
+		    exit 1
+	  fi
+fi
+
+if [ $enableGolangciLint == true ]; then
+	  echo >&2 "${NORMAL}golangci-lint CHECK"
+	  # golangci-lint 代码检查
+	  if golangci-lint >/dev/null 2>&1; then  # 检测是否安装
+		    lint_errors=0
+		    for dir in ${godirs[@]} ; do
+    			  echo >&2 "golangci-lint run $PWD/$dir"
+			      lint=$(golangci-lint run $PWD/$dir 2>&1)
+    			  if [[ $? != 0 ]]; then
+				        echo >&2 "${RED}golangci-lint FAIL:\n$lint\n"
+				        lint_errors=1
+			      fi
+		    done
+		    if [[ $lint_errors == 0 ]]; then
+			      echo >&2 "${GREEN}golangci-lint SUCCESS\n"
+			  elif [ $golangciLintThrowErr == true ]; then
+			      has_errors=1
+		    fi
+	  else
+        echo '${RED}golangci-lint not install. Run: "go get -u github.com/golangci/golangci-lint/cmd/golangci-lint/..."' >&2
+        exit 1
+	  fi
+fi
+
+if [ $enableGocognit == true ]; then
+	  echo >&2 "${NORMAL}gocognit CHECK"
+	  # gocognit 代码圈复杂度检查
+	  if type gocognit >/dev/null 2>&1; then  # 检测是否安装
+		    cognit_errors=0
+        for file in ${gofiles[@]} ; do
+            cognit=$(gocognit -over ${gocognitThreshold} $PWD/$file 2>&1)
+            if [[ $? != 0 ]]; then
+                echo >&2 "${RED}gocognit FAIL:"
+                echo >&2 "gocognit -over ${gocognitThreshold} $PWD/$file"
+                echo >&2 "$cognit\n"
+                cognit_errors=1
+            fi
+        done
+        if [[ $cognit_errors == 0 ]]; then
+            echo >&2 "${GREEN}gocognit SUCCESS\n"
+        elif [ $gocognitThrowErr == true ]; then
+            has_errors=1
+        fi
+	  else
+        echo '${RED}gocognit not install. Run: "go get github.com/uudashr/gocognit/cmd/gocognit"' >&2
+        exit 1
+	  fi
+fi
+
+exit $has_errors
